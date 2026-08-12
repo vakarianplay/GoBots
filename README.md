@@ -1,8 +1,14 @@
-# GoTelegramBots
+# GoBots
 Collection of telegram bots for various situations
 
 ![alt text](https://img.shields.io/badge/Golang-1.21.1-blue?style=flat-square&logo=go)
 ![alt text](https://img.shields.io/badge/Telegram%20bot-gray?style=flat-square&logo=telegram)
+![alt text](https://img.shields.io/badge/Maxtrix%20bot-gray?style=flat-square&logo=matrix)
+
+```
+[UDP] Now it's not just for Telegram. We're also adding bots for [matrix]
+
+```
 
 
 --------------------------------------------
