@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,10 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -55,20 +50,15 @@ type oneMeshRecord struct {
 }
 
 type observerResp struct {
-	ObserverID      string `json:"observer_id"`
-	RegionCode      string `json:"region_code"`
-	Status          string `json:"status"`
-	IsOnline        bool   `json:"is_online"`
-	Observer        string `json:"observer"`
-	Model           string `json:"model"`
-	FirmwareVersion string `json:"firmware_version"`
-	BatteryMV       int64  `json:"battery_mv"`
-	UptimeSecs      int64  `json:"uptime_secs"`
-	Errors          int64  `json:"errors"`
-	QueueLen        int64  `json:"queue_len"`
-	LastMessageAt   string `json:"last_message_at"`
-	CreatedAt       string `json:"created_at"`
-	StatusUpdatedAt string `json:"status_updated_at"`
+	ObserverID    string `json:"observer_id"`
+	Observer      string `json:"observer"`
+	Status        string `json:"status"`
+	IsOnline      bool   `json:"is_online"`
+	BatteryMV     int64  `json:"battery_mv"`
+	UptimeSecs    int64  `json:"uptime_secs"`
+	Errors        int64  `json:"errors"`
+	QueueLen      int64  `json:"queue_len"`
+	LastMessageAt string `json:"last_message_at"`
 }
 
 type repeaterDashboardResp struct {
@@ -76,15 +66,12 @@ type repeaterDashboardResp struct {
 		ID           int64   `json:"id"`
 		PublicKeyHex string  `json:"public_key_hex"`
 		Name         string  `json:"name"`
-		IsRepeater   bool    `json:"is_repeater"`
 		Lat          float64 `json:"lat"`
 		Lon          float64 `json:"lon"`
 		FirstSeenAt  string  `json:"first_seen_at"`
 		LastSeenAt   string  `json:"last_seen_at"`
-		CreatedAt    string  `json:"created_at"`
 	} `json:"repeater"`
 	ResolvedRegionCode string `json:"resolved_region_code"`
-	ResolvedBy         string `json:"resolved_by"`
 }
 
 type oneMeshNodeResp struct {
@@ -137,7 +124,6 @@ func configBot() {
 
 func main() {
 	rootCtx := context.Background()
-
 	configBot()
 
 	db, err := initDB(sqliteDBPath)
@@ -145,13 +131,6 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 	defer db.Close()
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("cannot resolve home dir: %v", err)
-	}
-	wledScript := filepath.Join(homeDir, ".wled.sh")
-	logScript := filepath.Join(homeDir, ".log.sh")
 
 	client, err := mautrix.NewClient(matrixHomeserver, "", "")
 	if err != nil {
@@ -202,7 +181,7 @@ func main() {
 			return
 		}
 
-		reply, err := handleCommand(ctx, raw, wledScript, logScript, db)
+		reply, err := handleCommand(ctx, raw, db)
 		if err != nil {
 			reply = "Invalid input"
 		}
@@ -229,61 +208,24 @@ func main() {
 func handleCommand(
 	ctx context.Context,
 	raw string,
-	wledScript string,
-	logScript string,
 	db *sql.DB,
 ) (string, error) {
 	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("empty command")
+	}
+
 	if strings.HasPrefix(raw, "!") {
 		return handleBangCommand(ctx, raw, db)
 	}
 
-	cmd, arg := splitCommand(raw)
-
-	switch cmd {
-	case "sensors":
-		return runCmd(ctx, 8*time.Second, "sensors")
-	case "uptime":
-		return runCmd(ctx, 5*time.Second, "uptime")
-	case "free":
-		if strings.TrimSpace(arg) == "-h" {
-			return runCmd(ctx, 5*time.Second, "free", "-h")
-		}
-		return "", errors.New("invalid free args")
-	case "ls":
-		return runCmd(ctx, 5*time.Second, "ls")
-	case "mpc":
-		a := strings.TrimSpace(arg)
-		if a == "" {
-			return runCmd(ctx, 5*time.Second, "mpc")
-		}
-		if a == "next" {
-			return runCmd(ctx, 5*time.Second, "mpc", "next")
-		}
-		return "", errors.New("invalid mpc args")
-	case "wled":
-		return runCmd(ctx, 20*time.Second, wledScript)
-	case "log":
-		return runCmd(ctx, 20*time.Second, logScript)
-	case "curl":
-		return curlURL(ctx, strings.TrimSpace(arg))
-	case "ping":
+	switch strings.ToLower(raw) {
+	case "ping", "/ping":
 		return pingReport(ctx)
-	case "help":
+	case "help", "/help":
 		return strings.Join([]string{
-			"Системные команды:",
-			"sensors",
-			"uptime",
-			"free -h",
-			"ls",
-			"mpc",
-			"mpc next",
-			"curl <url>",
-			"wled",
-			"log",
+			"Команды:",
 			"ping",
-			"",
-			"Команды БД:",
 			"!add meshcoretel <ID>",
 			"!add onemesh <ID>",
 			"!list meshcoretel",
@@ -378,10 +320,13 @@ func handleBangCommand(
 		default:
 			return "Неизвестная цель. Доступно: meshcoretel, onemesh, all", nil
 		}
-
 	default:
 		return "Неизвестная команда. Используй: !add, !list, !delete, !show", nil
 	}
+}
+
+func pingReport(_ context.Context) (string, error) {
+	return "pong", nil
 }
 
 func initDB(path string) (*sql.DB, error) {
@@ -437,12 +382,12 @@ func addMeshcoretel(ctx context.Context, db *sql.DB, meshID string) (string, err
 	pk, _ := res.LastInsertId()
 	if deviceType == "observer" {
 		return fmt.Sprintf(
-			"Наблюдатель %s добавлен в базу",
+			"Наблюдатель %s добавлен в базу (primary key=%d)",
 			name, pk,
 		), nil
 	}
 	return fmt.Sprintf(
-		"Повторитель %s добавлен в базу",
+		"Повторитель %s добавлен в базу (primary key=%d)",
 		name, pk,
 	), nil
 }
@@ -525,10 +470,11 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 				fmt.Sprintf("status: %s", obs.Status),
 				fmt.Sprintf("is_online: %t", obs.IsOnline),
 				fmt.Sprintf("battery_mv: %d", obs.BatteryMV),
-				fmt.Sprintf("uptime_secs: %d", obs.UptimeSecs),
+				fmt.Sprintf("uptime_secs: %s", formatUptimeSecondsObserver(obs.UptimeSecs)),
 				fmt.Sprintf("errors: %d", obs.Errors),
 				fmt.Sprintf("queue_len: %d", obs.QueueLen),
-				fmt.Sprintf("last_message_at: %s", formatAPITimeLocal(obs.LastMessageAt)),
+				fmt.Sprintf("last_message_at: %s",
+					formatAPITimeLocal(obs.LastMessageAt)),
 			}, "\n"))
 		case "repeater":
 			rep, err := fetchRepeaterDashboard(ctx, r.MeshID)
@@ -546,8 +492,10 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 				fmt.Sprintf("public_key_hex: %s", rep.Repeater.PublicKeyHex),
 				fmt.Sprintf("lat/lon: %.5f, %.5f",
 					rep.Repeater.Lat, rep.Repeater.Lon),
-				fmt.Sprintf("first_seen_at: %s", formatAPITimeLocal(rep.Repeater.FirstSeenAt)),
-				fmt.Sprintf("last_seen_at: %s", formatAPITimeLocal(rep.Repeater.LastSeenAt)),
+				fmt.Sprintf("first_seen_at: %s",
+					formatAPITimeLocal(rep.Repeater.FirstSeenAt)),
+				fmt.Sprintf("last_seen_at: %s",
+					formatAPITimeLocal(rep.Repeater.LastSeenAt)),
 				fmt.Sprintf("resolved_region_code: %s", rep.ResolvedRegionCode),
 			}, "\n"))
 		default:
@@ -595,7 +543,7 @@ func addOnemesh(ctx context.Context, db *sql.DB, nodeID string) (string, error) 
 
 	pk, _ := res.LastInsertId()
 	return fmt.Sprintf(
-		"Нода (%s) %s добавлена в базу",
+		"Нода %s %s добавлена в базу (primary key=%d)",
 		node.ShortName, node.LongName, pk,
 	), nil
 }
@@ -892,27 +840,14 @@ func parseFloatPtr(s *string) (float64, bool) {
 	return f, true
 }
 
-func formatAPITimeLocal(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "n/a"
+func formatUptimeSecondsObserver(sec int64) string {
+	if sec < 0 {
+		sec = 0
 	}
-
-	layouts := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.999999Z07:00",
-		"2006-01-02T15:04:05Z07:00",
-	}
-
-	for _, layout := range layouts {
-		t, err := time.Parse(layout, raw)
-		if err == nil {
-			return t.In(time.Local).Format("2006-01-02 15:04:05 MST")
-		}
-	}
-
-	return raw
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
 func formatUptimeSeconds(s *string) string {
@@ -936,205 +871,33 @@ func formatUptimeSeconds(s *string) string {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, ss)
 }
 
+func formatAPITimeLocal(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "n/a"
+	}
+
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999Z07:00",
+		"2006-01-02T15:04:05Z07:00",
+	}
+
+	for _, layout := range layouts {
+		t, err := time.Parse(layout, raw)
+		if err == nil {
+			return t.In(time.Local).Format("2006-01-02 15:04:05 MST")
+		}
+	}
+	return raw
+}
+
 func safe(v string, fallback string) string {
 	if strings.TrimSpace(v) != "" {
 		return v
 	}
 	return fallback
-}
-
-func pingReport(ctx context.Context) (string, error) {
-	sensorsOut, _ := runCmd(ctx, 8*time.Second, "sensors")
-	load1, load5, load15 := readLoadAvg()
-	memUsed, memTotal, memPct := readMemUsage()
-	uptimeText := readUptimeHuman()
-
-	if strings.TrimSpace(sensorsOut) == "" {
-		sensorsOut = "(no output)"
-	}
-
-	return fmt.Sprintf(
-		"pong\n\nCPU load: %s %s %s\nRAM: %s / %s (%.1f%%)\nUptime: %s\n\nSensors:\n%s",
-		load1, load5, load15, memUsed, memTotal, memPct, uptimeText, sensorsOut,
-	), nil
-}
-
-func runCmd(
-	parent context.Context,
-	timeout time.Duration,
-	name string,
-	args ...string,
-) (string, error) {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "Command timeout", nil
-	}
-	if err != nil && len(out) == 0 {
-		return "", err
-	}
-	if len(out) == 0 {
-		return "(no output)", nil
-	}
-	return string(out), nil
-}
-
-func curlURL(parent context.Context, rawURL string) (string, error) {
-	if rawURL == "" {
-		return "", errors.New("empty url")
-	}
-
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", errors.New("only http/https allowed")
-	}
-	if u.Host == "" {
-		return "", errors.New("invalid host")
-	}
-
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Sprintf("curl error: %v", err), nil
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPRead))
-	if err != nil {
-		return fmt.Sprintf("read error: %v", err), nil
-	}
-
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		text = "(no output)"
-	}
-
-	return fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, text), nil
-}
-
-func splitCommand(raw string) (string, string) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", ""
-	}
-	parts := strings.SplitN(s, " ", 2)
-	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
-	cmd = strings.TrimPrefix(cmd, "/")
-	if len(parts) == 1 {
-		return cmd, ""
-	}
-	return cmd, parts[1]
-}
-
-func readLoadAvg() (string, string, string) {
-	b, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		return "n/a", "n/a", "n/a"
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) < 3 {
-		return "n/a", "n/a", "n/a"
-	}
-	return fields[0], fields[1], fields[2]
-}
-
-func readMemUsage() (used string, total string, pct float64) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return "n/a", "n/a", 0
-	}
-	defer f.Close()
-
-	var memTotalKB float64
-	var memAvailKB float64
-
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "MemTotal:") {
-			memTotalKB = parseMeminfoKB(line)
-		}
-		if strings.HasPrefix(line, "MemAvailable:") {
-			memAvailKB = parseMeminfoKB(line)
-		}
-	}
-
-	if memTotalKB <= 0 {
-		return "n/a", "n/a", 0
-	}
-
-	usedKB := memTotalKB - memAvailKB
-	if usedKB < 0 {
-		usedKB = 0
-	}
-
-	pct = (usedKB / memTotalKB) * 100.0
-	return formatKB(usedKB), formatKB(memTotalKB), pct
-}
-
-func parseMeminfoKB(line string) float64 {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0
-	}
-	v, err := strconv.ParseFloat(fields[1], 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-func formatKB(kb float64) string {
-	const kbInGiB = 1024 * 1024
-	const kbInMiB = 1024
-
-	if kb >= kbInGiB {
-		return fmt.Sprintf("%.2f GiB", kb/kbInGiB)
-	}
-	return fmt.Sprintf("%.0f MiB", kb/kbInMiB)
-}
-
-func readUptimeHuman() string {
-	b, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return "n/a"
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return "n/a"
-	}
-	seconds, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return "n/a"
-	}
-	return humanDuration(time.Duration(seconds) * time.Second)
-}
-
-func humanDuration(d time.Duration) string {
-	totalSec := int(d.Seconds())
-	days := totalSec / 86400
-	totalSec %= 86400
-	hours := totalSec / 3600
-	totalSec %= 3600
-	mins := totalSec / 60
-	secs := totalSec % 60
-
-	if days > 0 {
-		return fmt.Sprintf("%dd %02dh %02dm %02ds", days, hours, mins, secs)
-	}
-	return fmt.Sprintf("%02dh %02dm %02ds", hours, mins, secs)
 }
 
 func sendText(
