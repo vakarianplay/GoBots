@@ -528,7 +528,7 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 				fmt.Sprintf("uptime_secs: %d", obs.UptimeSecs),
 				fmt.Sprintf("errors: %d", obs.Errors),
 				fmt.Sprintf("queue_len: %d", obs.QueueLen),
-				fmt.Sprintf("last_message_at: %s", obs.LastMessageAt),
+				fmt.Sprintf("last_message_at: %s", formatAPITimeLocal(obs.LastMessageAt)),
 			}, "\n"))
 		case "repeater":
 			rep, err := fetchRepeaterDashboard(ctx, r.MeshID)
@@ -546,8 +546,8 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 				fmt.Sprintf("public_key_hex: %s", rep.Repeater.PublicKeyHex),
 				fmt.Sprintf("lat/lon: %.5f, %.5f",
 					rep.Repeater.Lat, rep.Repeater.Lon),
-				fmt.Sprintf("first_seen_at: %s", rep.Repeater.FirstSeenAt),
-				fmt.Sprintf("last_seen_at: %s", rep.Repeater.LastSeenAt),
+				fmt.Sprintf("first_seen_at: %s", formatAPITimeLocal(rep.Repeater.FirstSeenAt)),
+				fmt.Sprintf("last_seen_at: %s", formatAPITimeLocal(rep.Repeater.LastSeenAt)),
 				fmt.Sprintf("resolved_region_code: %s", rep.ResolvedRegionCode),
 			}, "\n"))
 		default:
@@ -704,7 +704,7 @@ func showOnemesh(ctx context.Context, db *sql.DB) (string, error) {
 			fmt.Sprintf("relative_humidity: %s", hum),
 			fmt.Sprintf("barometric_pressure: %s", barMMHG),
 			fmt.Sprintf("radiation: %s", rad),
-			fmt.Sprintf("updated_at: %s", n.UpdatedAt),
+			fmt.Sprintf("updated_at: %s", formatAPITimeLocal(n.UpdatedAt)),
 		}, "\n"))
 	}
 
@@ -890,6 +890,29 @@ func parseFloatPtr(s *string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+func formatAPITimeLocal(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "n/a"
+	}
+
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999Z07:00",
+		"2006-01-02T15:04:05Z07:00",
+	}
+
+	for _, layout := range layouts {
+		t, err := time.Parse(layout, raw)
+		if err == nil {
+			return t.In(time.Local).Format("2006-01-02 15:04:05 MST")
+		}
+	}
+
+	return raw
 }
 
 func formatUptimeSeconds(s *string) string {
