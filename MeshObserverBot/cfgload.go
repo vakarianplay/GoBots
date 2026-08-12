@@ -30,6 +30,7 @@ func readCfg() []string {
 	device_id := (cfgYaml["matrix"].(map[string]interface{})["device_id"])
 	target_room := (cfgYaml["room"].(map[string]interface{})["target_room"])
 	allowed_user := (cfgYaml["room"].(map[string]interface{})["allowed_user"])
+	sqlite_path := (cfgYaml["database"].(map[string]interface{})["sqlite_path"])
 
 	homeserver_ := fmt.Sprintf("%v", homeserver)
 	username_ := fmt.Sprintf("%v", username)
@@ -37,9 +38,10 @@ func readCfg() []string {
 	device_id_ := fmt.Sprintf("%v", device_id)
 	target_room_ := fmt.Sprintf("%v", target_room)
 	allowed_user_ := fmt.Sprintf("%v", allowed_user)
+	sqlite_path_ := fmt.Sprintf("%v", sqlite_path)
 
 	var out []string
-	out = append(out, homeserver_, username_, password_, device_id_, target_room_, allowed_user_)
+	out = append(out, homeserver_, username_, password_, device_id_, target_room_, allowed_user_, sqlite_path_)
 
 	fmt.Println(out)
 	return out
