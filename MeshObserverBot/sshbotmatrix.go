@@ -41,12 +41,15 @@ type meshRecord struct {
 	MeshID     string
 	DeviceType string
 	Name       string
+	AddedBy    string
 }
 
 type oneMeshRecord struct {
-	PK     int64
-	NodeID string
-	Name   string
+	PK        int64
+	NodeID    string
+	ShortName string
+	LongName  string
+	AddedBy   string
 }
 
 type observerResp struct {
@@ -157,10 +160,7 @@ func main() {
 		log.Fatal("client syncer is not *mautrix.DefaultSyncer")
 	}
 
-	syncer.OnEventType(event.EventMessage, func(
-		ctx context.Context,
-		evt *event.Event,
-	) {
+	syncer.OnEventType(event.EventMessage, func(ctx context.Context, evt *event.Event) {
 		if evt == nil || evt.Sender == client.UserID {
 			return
 		}
@@ -181,7 +181,8 @@ func main() {
 			return
 		}
 
-		reply, err := handleCommand(ctx, raw, db)
+		senderUsername := extractMatrixUsername(evt.Sender)
+		reply, err := handleCommand(ctx, raw, db, senderUsername)
 		if err != nil {
 			reply = "Invalid input"
 		}
@@ -209,6 +210,7 @@ func handleCommand(
 	ctx context.Context,
 	raw string,
 	db *sql.DB,
+	addedBy string,
 ) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -216,12 +218,12 @@ func handleCommand(
 	}
 
 	if strings.HasPrefix(raw, "!") {
-		return handleBangCommand(ctx, raw, db)
+		return handleBangCommand(ctx, raw, db, addedBy)
 	}
 
 	switch strings.ToLower(raw) {
 	case "ping", "/ping":
-		return pingReport(ctx)
+		return "pong", nil
 	case "help", "/help":
 		return strings.Join([]string{
 			"Команды:",
@@ -245,6 +247,7 @@ func handleBangCommand(
 	ctx context.Context,
 	raw string,
 	db *sql.DB,
+	addedBy string,
 ) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(raw))
 	if len(parts) == 0 {
@@ -263,9 +266,9 @@ func handleBangCommand(
 
 		switch target {
 		case "meshcoretel":
-			return addMeshcoretel(ctx, db, idArg)
+			return addMeshcoretel(ctx, db, idArg, addedBy)
 		case "onemesh":
-			return addOnemesh(ctx, db, idArg)
+			return addOnemesh(ctx, db, idArg, addedBy)
 		default:
 			return "Неизвестная таблица. Доступно: meshcoretel, onemesh", nil
 		}
@@ -325,10 +328,6 @@ func handleBangCommand(
 	}
 }
 
-func pingReport(_ context.Context) (string, error) {
-	return "pong", nil
-}
-
 func initDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -341,13 +340,16 @@ CREATE TABLE IF NOT EXISTS meshcoretel (
     mesh_id TEXT NOT NULL UNIQUE,
     device_type TEXT NOT NULL,
     name TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS onemesh (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
+    short_name TEXT NOT NULL DEFAULT '',
+    long_name TEXT NOT NULL DEFAULT '',
+    added_by TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `
@@ -355,10 +357,83 @@ CREATE TABLE IF NOT EXISTS onemesh (
 		_ = db.Close()
 		return nil, err
 	}
+
+	if err := ensureColumn(
+		db,
+		"meshcoretel",
+		"added_by",
+		"ALTER TABLE meshcoretel ADD COLUMN added_by TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if err := ensureColumn(
+		db,
+		"onemesh",
+		"short_name",
+		"ALTER TABLE onemesh ADD COLUMN short_name TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureColumn(
+		db,
+		"onemesh",
+		"long_name",
+		"ALTER TABLE onemesh ADD COLUMN long_name TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureColumn(
+		db,
+		"onemesh",
+		"added_by",
+		"ALTER TABLE onemesh ADD COLUMN added_by TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	return db, nil
 }
 
-func addMeshcoretel(ctx context.Context, db *sql.DB, meshID string) (string, error) {
+func ensureColumn(db *sql.DB, table string, column string, alterSQL string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var ctype string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(name, column) {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec(alterSQL)
+	return err
+}
+
+func addMeshcoretel(
+	ctx context.Context,
+	db *sql.DB,
+	meshID string,
+	addedBy string,
+) (string, error) {
 	if meshID == "" {
 		return "Использование: !add meshcoretel <ID>", nil
 	}
@@ -369,8 +444,9 @@ func addMeshcoretel(ctx context.Context, db *sql.DB, meshID string) (string, err
 	}
 
 	res, err := db.Exec(
-		`INSERT INTO meshcoretel(mesh_id, device_type, name) VALUES(?,?,?)`,
-		meshID, deviceType, name,
+		`INSERT INTO meshcoretel(mesh_id, device_type, name, added_by)
+		 VALUES(?,?,?,?)`,
+		meshID, deviceType, name, addedBy,
 	)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -394,7 +470,8 @@ func addMeshcoretel(ctx context.Context, db *sql.DB, meshID string) (string, err
 
 func listMeshcoretel(db *sql.DB) (string, error) {
 	rows, err := db.Query(
-		`SELECT id, mesh_id, device_type, name FROM meshcoretel ORDER BY id`,
+		`SELECT id, mesh_id, device_type, name, added_by
+		 FROM meshcoretel ORDER BY id`,
 	)
 	if err != nil {
 		return "", err
@@ -408,12 +485,18 @@ func listMeshcoretel(db *sql.DB) (string, error) {
 	for rows.Next() {
 		hasRows = true
 		var r meshRecord
-		if err := rows.Scan(&r.PK, &r.MeshID, &r.DeviceType, &r.Name); err != nil {
+		if err := rows.Scan(
+			&r.PK,
+			&r.MeshID,
+			&r.DeviceType,
+			&r.Name,
+			&r.AddedBy,
+		); err != nil {
 			return "", err
 		}
 		out = append(out, fmt.Sprintf(
-			"%d) %s (%s), mesh_id=%s",
-			r.PK, r.Name, r.DeviceType, r.MeshID,
+			"%d) %s (%s), mesh_id=%s, added_by=%s",
+			r.PK, r.Name, r.DeviceType, r.MeshID, safe(r.AddedBy, "unknown"),
 		))
 	}
 	if err := rows.Err(); err != nil {
@@ -440,7 +523,8 @@ func deleteMeshcoretel(db *sql.DB, pk int64) (string, error) {
 
 func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 	rows, err := db.Query(
-		`SELECT id, mesh_id, device_type, name FROM meshcoretel ORDER BY id`,
+		`SELECT id, mesh_id, device_type, name, added_by
+		 FROM meshcoretel ORDER BY id`,
 	)
 	if err != nil {
 		return "", err
@@ -450,7 +534,13 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 	var blocks []string
 	for rows.Next() {
 		var r meshRecord
-		if err := rows.Scan(&r.PK, &r.MeshID, &r.DeviceType, &r.Name); err != nil {
+		if err := rows.Scan(
+			&r.PK,
+			&r.MeshID,
+			&r.DeviceType,
+			&r.Name,
+			&r.AddedBy,
+		); err != nil {
 			return "", err
 		}
 
@@ -459,18 +549,20 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 			obs, err := fetchObserver(ctx, r.MeshID)
 			if err != nil {
 				blocks = append(blocks, fmt.Sprintf(
-					"[%d] Наблюдатель: %s\nmesh_id: %s\nОшибка получения данных: %v",
-					r.PK, r.Name, r.MeshID, err,
+					"[%d] Наблюдатель: %s\nmesh_id: %s\nadded_by: %s\nОшибка получения данных: %v",
+					r.PK, r.Name, r.MeshID, safe(r.AddedBy, "unknown"), err,
 				))
 				continue
 			}
 			blocks = append(blocks, strings.Join([]string{
 				fmt.Sprintf("[%d] Наблюдатель: %s", r.PK, safe(obs.Observer, r.Name)),
 				fmt.Sprintf("mesh_id: %s", r.MeshID),
+				fmt.Sprintf("added_by: %s", safe(r.AddedBy, "unknown")),
 				fmt.Sprintf("status: %s", obs.Status),
 				fmt.Sprintf("is_online: %t", obs.IsOnline),
 				fmt.Sprintf("battery_mv: %d", obs.BatteryMV),
-				fmt.Sprintf("uptime_secs: %s", formatUptimeSecondsObserver(obs.UptimeSecs)),
+				fmt.Sprintf("uptime_secs: %s",
+					formatSecondsHHMMSS(obs.UptimeSecs)),
 				fmt.Sprintf("errors: %d", obs.Errors),
 				fmt.Sprintf("queue_len: %d", obs.QueueLen),
 				fmt.Sprintf("last_message_at: %s",
@@ -480,8 +572,8 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 			rep, err := fetchRepeaterDashboard(ctx, r.MeshID)
 			if err != nil {
 				blocks = append(blocks, fmt.Sprintf(
-					"[%d] Повторитель: %s\nmesh_id: %s\nОшибка получения данных: %v",
-					r.PK, r.Name, r.MeshID, err,
+					"[%d] Повторитель: %s\nmesh_id: %s\nadded_by: %s\nОшибка получения данных: %v",
+					r.PK, r.Name, r.MeshID, safe(r.AddedBy, "unknown"), err,
 				))
 				continue
 			}
@@ -489,6 +581,7 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 				fmt.Sprintf("[%d] Повторитель: %s",
 					r.PK, safe(rep.Repeater.Name, r.Name)),
 				fmt.Sprintf("mesh_id: %s", r.MeshID),
+				fmt.Sprintf("added_by: %s", safe(r.AddedBy, "unknown")),
 				fmt.Sprintf("public_key_hex: %s", rep.Repeater.PublicKeyHex),
 				fmt.Sprintf("lat/lon: %.5f, %.5f",
 					rep.Repeater.Lat, rep.Repeater.Lon),
@@ -500,8 +593,8 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 			}, "\n"))
 		default:
 			blocks = append(blocks, fmt.Sprintf(
-				"[%d] %s\nmesh_id: %s\nНеизвестный тип устройства: %s",
-				r.PK, r.Name, r.MeshID, r.DeviceType,
+				"[%d] %s\nmesh_id: %s\nadded_by: %s\nНеизвестный тип устройства: %s",
+				r.PK, r.Name, r.MeshID, safe(r.AddedBy, "unknown"), r.DeviceType,
 			))
 		}
 	}
@@ -515,7 +608,12 @@ func showMeshcoretel(ctx context.Context, db *sql.DB) (string, error) {
 	return strings.Join(blocks, "\n"+lineSeparator+"\n"), nil
 }
 
-func addOnemesh(ctx context.Context, db *sql.DB, nodeID string) (string, error) {
+func addOnemesh(
+	ctx context.Context,
+	db *sql.DB,
+	nodeID string,
+	addedBy string,
+) (string, error) {
 	if nodeID == "" {
 		return "Использование: !add onemesh <ID>", nil
 	}
@@ -525,14 +623,10 @@ func addOnemesh(ctx context.Context, db *sql.DB, nodeID string) (string, error) 
 		return "ID не найден", nil
 	}
 
-	name := strings.TrimSpace(node.ShortName + " " + node.LongName)
-	if name == "" {
-		name = node.NodeID
-	}
-
 	res, err := db.Exec(
-		`INSERT INTO onemesh(node_id, name) VALUES(?, ?)`,
-		node.NodeID, name,
+		`INSERT INTO onemesh(node_id, short_name, long_name, added_by)
+		 VALUES(?,?,?,?)`,
+		node.NodeID, node.ShortName, node.LongName, addedBy,
 	)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -549,7 +643,10 @@ func addOnemesh(ctx context.Context, db *sql.DB, nodeID string) (string, error) 
 }
 
 func listOnemesh(db *sql.DB) (string, error) {
-	rows, err := db.Query(`SELECT id, node_id, name FROM onemesh ORDER BY id`)
+	rows, err := db.Query(
+		`SELECT id, node_id, short_name, long_name, added_by
+		 FROM onemesh ORDER BY id`,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -562,10 +659,23 @@ func listOnemesh(db *sql.DB) (string, error) {
 	for rows.Next() {
 		hasRows = true
 		var r oneMeshRecord
-		if err := rows.Scan(&r.PK, &r.NodeID, &r.Name); err != nil {
+		if err := rows.Scan(
+			&r.PK,
+			&r.NodeID,
+			&r.ShortName,
+			&r.LongName,
+			&r.AddedBy,
+		); err != nil {
 			return "", err
 		}
-		out = append(out, fmt.Sprintf("%d) %s, node_id=%s", r.PK, r.Name, r.NodeID))
+		out = append(out, fmt.Sprintf(
+			"%d) %s %s, node_id=%s, added_by=%s",
+			r.PK,
+			strings.TrimSpace(r.ShortName),
+			strings.TrimSpace(r.LongName),
+			r.NodeID,
+			safe(r.AddedBy, "unknown"),
+		))
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
@@ -590,7 +700,10 @@ func deleteOnemesh(db *sql.DB, pk int64) (string, error) {
 }
 
 func showOnemesh(ctx context.Context, db *sql.DB) (string, error) {
-	rows, err := db.Query(`SELECT id, node_id, name FROM onemesh ORDER BY id`)
+	rows, err := db.Query(
+		`SELECT id, node_id, short_name, long_name, added_by
+		 FROM onemesh ORDER BY id`,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -600,15 +713,21 @@ func showOnemesh(ctx context.Context, db *sql.DB) (string, error) {
 
 	for rows.Next() {
 		var r oneMeshRecord
-		if err := rows.Scan(&r.PK, &r.NodeID, &r.Name); err != nil {
+		if err := rows.Scan(
+			&r.PK,
+			&r.NodeID,
+			&r.ShortName,
+			&r.LongName,
+			&r.AddedBy,
+		); err != nil {
 			return "", err
 		}
 
 		n, err := fetchOnemeshNode(ctx, r.NodeID)
 		if err != nil {
 			blocks = append(blocks, fmt.Sprintf(
-				"[%d] Нода: %s\nnode_id: %s\nОшибка получения данных: %v",
-				r.PK, r.Name, r.NodeID, err,
+				"[%d] Нода: %s %s\nnode_id: %s\nadded_by: %s\nОшибка получения данных: %v",
+				r.PK, r.ShortName, r.LongName, r.NodeID, safe(r.AddedBy, "unknown"), err,
 			))
 			continue
 		}
@@ -644,7 +763,9 @@ func showOnemesh(ctx context.Context, db *sql.DB) (string, error) {
 			fmt.Sprintf("[%d] Нода: %s %s", r.PK, n.ShortName, n.LongName),
 			fmt.Sprintf("id: %s", n.ID),
 			fmt.Sprintf("node_id: %s", n.NodeID),
+			fmt.Sprintf("short_name: %s", n.ShortName),
 			fmt.Sprintf("long_name: %s", n.LongName),
+			fmt.Sprintf("added_by: %s", safe(r.AddedBy, "unknown")),
 			fmt.Sprintf("battery_level: %d%%", n.BatteryLevel),
 			fmt.Sprintf("voltage: %s", voltage),
 			fmt.Sprintf("uptime_seconds: %s", uptime),
@@ -840,16 +961,6 @@ func parseFloatPtr(s *string) (float64, bool) {
 	return f, true
 }
 
-func formatUptimeSecondsObserver(sec int64) string {
-	if sec < 0 {
-		sec = 0
-	}
-	h := sec / 3600
-	m := (sec % 3600) / 60
-	s := sec % 60
-	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
-}
-
 func formatUptimeSeconds(s *string) string {
 	if s == nil {
 		return "n/a"
@@ -869,6 +980,16 @@ func formatUptimeSeconds(s *string) string {
 	m := (sec % 3600) / 60
 	ss := sec % 60
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, ss)
+}
+
+func formatSecondsHHMMSS(sec int64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
 func formatAPITimeLocal(raw string) string {
@@ -898,6 +1019,18 @@ func safe(v string, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func extractMatrixUsername(userID id.UserID) string {
+	s := strings.TrimSpace(string(userID))
+	s = strings.TrimPrefix(s, "@")
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 func sendText(
