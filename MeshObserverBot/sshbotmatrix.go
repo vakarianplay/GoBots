@@ -100,6 +100,15 @@ type detailResp struct {
 	Detail string `json:"detail"`
 }
 
+type progressTracker struct {
+	ctx    context.Context
+	client *mautrix.Client
+	roomID id.RoomID
+	msgID  id.EventID
+	total  int
+	done   int
+}
+
 func configBot() {
 	cfg := readCfg()
 	if len(cfg) < 7 {
@@ -186,13 +195,24 @@ func main() {
 		}
 
 		owner := ownerKey(evt.Sender)
+
+		if target, ok := parseShowTarget(raw); ok {
+			err := handleShowWithProgress(
+				ctx, client, evt.RoomID, db, owner, target,
+			)
+			if err != nil {
+				_, _ = sendText(ctx, client, evt.RoomID, "Ошибка формирования отчета")
+			}
+			return
+		}
+
 		reply, err := handleCommand(ctx, raw, db, owner)
 		if err != nil {
 			reply = "Invalid input"
 		}
 		reply = trimReply(reply, maxReplyLen)
 
-		if err := sendText(ctx, client, evt.RoomID, reply); err != nil {
+		if _, err := sendText(ctx, client, evt.RoomID, reply); err != nil {
 			log.Printf("send error: %v", err)
 		}
 	})
@@ -312,24 +332,396 @@ func handleBangCommand(
 		}
 
 	case "show":
-		if len(parts) < 2 {
-			return "Использование: !show <meshcoretel|onemesh|all>", nil
-		}
-		target := strings.ToLower(parts[1])
-
-		switch target {
-		case "meshcoretel":
-			return showMeshcoretel(ctx, db, owner)
-		case "onemesh":
-			return showOnemesh(ctx, db, owner)
-		case "all":
-			return showAll(ctx, db, owner)
-		default:
-			return "Неизвестная цель. Доступно: meshcoretel, onemesh, all", nil
-		}
+		return "Формирование отчета выполняется отдельным обработчиком", nil
 	default:
 		return "Неизвестная команда. Используй: !add, !list, !delete, !show", nil
 	}
+}
+
+func handleShowWithProgress(
+	ctx context.Context,
+	client *mautrix.Client,
+	roomID id.RoomID,
+	db *sql.DB,
+	owner string,
+	target string,
+) error {
+	total, err := countForTarget(db, owner, target)
+	if err != nil {
+		return err
+	}
+
+	if total == 0 {
+		switch target {
+		case "meshcoretel":
+			_, _ = sendText(ctx, client, roomID, "У вас нет записей в meshcoretel")
+		case "onemesh":
+			_, _ = sendText(ctx, client, roomID, "У вас нет записей в onemesh")
+		case "all":
+			_, _ = sendText(ctx, client, roomID, "У вас нет записей ни в одной таблице")
+		}
+		return nil
+	}
+
+	startMsg := fmt.Sprintf(
+		"Формируется отчет, пожалуйста подождите (1/%d)", total,
+	)
+	msgID, err := sendText(ctx, client, roomID, startMsg)
+	if err != nil {
+		return err
+	}
+
+	tr := &progressTracker{
+		ctx:    ctx,
+		client: client,
+		roomID: roomID,
+		msgID:  msgID,
+		total:  total,
+		done:   0,
+	}
+
+	firstReq := true
+
+	var report string
+	switch target {
+	case "meshcoretel":
+		report, err = buildMeshcoretelReport(ctx, db, owner, tr, &firstReq)
+	case "onemesh":
+		report, err = buildOnemeshReport(ctx, db, owner, tr, &firstReq)
+	case "all":
+		report, err = buildAllReport(ctx, db, owner, tr, &firstReq)
+	default:
+		err = errors.New("unknown show target")
+	}
+
+	if err != nil {
+		_ = editText(ctx, client, roomID, msgID, "Ошибка формирования отчета")
+		return err
+	}
+
+	_ = editText(ctx, client, roomID, msgID, "Отчет сформирован")
+	_, _ = sendText(ctx, client, roomID, trimReply(report, maxReplyLen))
+	return nil
+}
+
+func parseShowTarget(raw string) (string, bool) {
+	parts := strings.Fields(strings.TrimSpace(raw))
+	if len(parts) < 2 {
+		return "", false
+	}
+	if strings.ToLower(strings.TrimPrefix(parts[0], "!")) != "show" {
+		return "", false
+	}
+	target := strings.ToLower(parts[1])
+	switch target {
+	case "meshcoretel", "onemesh", "all":
+		return target, true
+	default:
+		return "", false
+	}
+}
+
+func countForTarget(db *sql.DB, owner string, target string) (int, error) {
+	switch target {
+	case "meshcoretel":
+		return countMeshcoretel(db, owner)
+	case "onemesh":
+		return countOnemesh(db, owner)
+	case "all":
+		a, err := countMeshcoretel(db, owner)
+		if err != nil {
+			return 0, err
+		}
+		b, err := countOnemesh(db, owner)
+		if err != nil {
+			return 0, err
+		}
+		return a + b, nil
+	default:
+		return 0, errors.New("unknown target")
+	}
+}
+
+func countMeshcoretel(db *sql.DB, owner string) (int, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM meshcoretel WHERE added_by = ?`,
+		owner,
+	).Scan(&n)
+	return n, err
+}
+
+func countOnemesh(db *sql.DB, owner string) (int, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM onemesh WHERE added_by = ?`,
+		owner,
+	).Scan(&n)
+	return n, err
+}
+
+func (p *progressTracker) step() {
+	p.done++
+	current := p.done
+	if current < 1 {
+		current = 1
+	}
+	if current > p.total {
+		current = p.total
+	}
+	text := fmt.Sprintf(
+		"Формируется отчет, пожалуйста подождите (%d/%d)",
+		current, p.total,
+	)
+	_ = editText(p.ctx, p.client, p.roomID, p.msgID, text)
+}
+
+func waitRateLimit(ctx context.Context, first *bool) error {
+	if *first {
+		*first = false
+		return nil
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func buildAllReport(
+	ctx context.Context,
+	db *sql.DB,
+	owner string,
+	tr *progressTracker,
+	firstReq *bool,
+) (string, error) {
+	meshTxt, err := buildMeshcoretelReport(ctx, db, owner, tr, firstReq)
+	if err != nil {
+		return "", err
+	}
+	oneTxt, err := buildOnemeshReport(ctx, db, owner, tr, firstReq)
+	if err != nil {
+		return "", err
+	}
+
+	var parts []string
+	if meshTxt != "У вас нет записей в meshcoretel" {
+		parts = append(parts, "meshcoretel:\n"+meshTxt)
+	}
+	if oneTxt != "У вас нет записей в onemesh" {
+		parts = append(parts, "onemesh:\n"+oneTxt)
+	}
+
+	if len(parts) == 0 {
+		return "У вас нет записей ни в одной таблице", nil
+	}
+	return strings.Join(parts, "\n"+lineSeparator+"\n"), nil
+}
+
+func buildMeshcoretelReport(
+	ctx context.Context,
+	db *sql.DB,
+	owner string,
+	tr *progressTracker,
+	firstReq *bool,
+) (string, error) {
+	rows, err := db.Query(
+		`SELECT id, mesh_id, device_type, name, added_by
+		 FROM meshcoretel
+		 WHERE added_by = ?
+		 ORDER BY id`,
+		owner,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var blocks []string
+	for rows.Next() {
+		var r meshRecord
+		if err := rows.Scan(
+			&r.PK, &r.MeshID, &r.DeviceType, &r.Name, &r.AddedBy,
+		); err != nil {
+			return "", err
+		}
+
+		if err := waitRateLimit(ctx, firstReq); err != nil {
+			return "", err
+		}
+
+		switch r.DeviceType {
+		case "observer":
+			obs, err := fetchObserver(ctx, r.MeshID)
+			if err != nil {
+				blocks = append(blocks, fmt.Sprintf(
+					"[%d] Наблюдатель: %s\nmesh_id: %s\nОшибка получения данных: %v",
+					r.PK, r.Name, r.MeshID, err,
+				))
+			} else {
+				blocks = append(blocks, strings.Join([]string{
+					fmt.Sprintf("[%d] Наблюдатель: %s",
+						r.PK, safe(obs.Observer, r.Name)),
+					fmt.Sprintf("mesh_id: %s", r.MeshID),
+					fmt.Sprintf("status: %s", obs.Status),
+					fmt.Sprintf("is_online: %t", obs.IsOnline),
+					fmt.Sprintf("battery_mv: %d", obs.BatteryMV),
+					fmt.Sprintf("uptime_secs: %s",
+						formatSecondsHHMMSS(obs.UptimeSecs)),
+					fmt.Sprintf("errors: %d", obs.Errors),
+					fmt.Sprintf("queue_len: %d", obs.QueueLen),
+					fmt.Sprintf("last_message_at: %s",
+						formatAPITimeLocal(obs.LastMessageAt)),
+				}, "\n"))
+			}
+		case "repeater":
+			rep, err := fetchRepeaterDashboard(ctx, r.MeshID)
+			if err != nil {
+				blocks = append(blocks, fmt.Sprintf(
+					"[%d] Повторитель: %s\nmesh_id: %s\nОшибка получения данных: %v",
+					r.PK, r.Name, r.MeshID, err,
+				))
+			} else {
+				blocks = append(blocks, strings.Join([]string{
+					fmt.Sprintf("[%d] Повторитель: %s",
+						r.PK, safe(rep.Repeater.Name, r.Name)),
+					fmt.Sprintf("mesh_id: %s", r.MeshID),
+					fmt.Sprintf("public_key_hex: %s",
+						rep.Repeater.PublicKeyHex),
+					fmt.Sprintf("lat/lon: %.5f, %.5f",
+						rep.Repeater.Lat, rep.Repeater.Lon),
+					fmt.Sprintf("first_seen_at: %s",
+						formatAPITimeLocal(rep.Repeater.FirstSeenAt)),
+					fmt.Sprintf("last_seen_at: %s",
+						formatAPITimeLocal(rep.Repeater.LastSeenAt)),
+					fmt.Sprintf("resolved_region_code: %s",
+						rep.ResolvedRegionCode),
+				}, "\n"))
+			}
+		default:
+			blocks = append(blocks, fmt.Sprintf(
+				"[%d] %s\nmesh_id: %s\nНеизвестный тип устройства: %s",
+				r.PK, r.Name, r.MeshID, r.DeviceType,
+			))
+		}
+
+		if tr != nil {
+			tr.step()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	if len(blocks) == 0 {
+		return "У вас нет записей в meshcoretel", nil
+	}
+	return strings.Join(blocks, "\n"+lineSeparator+"\n"), nil
+}
+
+func buildOnemeshReport(
+	ctx context.Context,
+	db *sql.DB,
+	owner string,
+	tr *progressTracker,
+	firstReq *bool,
+) (string, error) {
+	rows, err := db.Query(
+		`SELECT id, node_id, short_name, long_name, added_by
+		 FROM onemesh
+		 WHERE added_by = ?
+		 ORDER BY id`,
+		owner,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var blocks []string
+	for rows.Next() {
+		var r oneMeshRecord
+		if err := rows.Scan(
+			&r.PK, &r.NodeID, &r.ShortName, &r.LongName, &r.AddedBy,
+		); err != nil {
+			return "", err
+		}
+
+		if err := waitRateLimit(ctx, firstReq); err != nil {
+			return "", err
+		}
+
+		n, err := fetchOnemeshNode(ctx, r.NodeID)
+		if err != nil {
+			blocks = append(blocks, fmt.Sprintf(
+				"[%d] Нода: %s %s\nnode_id: %s\nОшибка получения данных: %v",
+				r.PK, r.ShortName, r.LongName, r.NodeID, err,
+			))
+			if tr != nil {
+				tr.step()
+			}
+			continue
+		}
+
+		barMMHG := "n/a"
+		if v, ok := parseFloatPtr(n.BarometricPressure); ok {
+			barMMHG = fmt.Sprintf("%.1f мм.рт.ст", v*0.75006156)
+		}
+
+		voltage := "n/a"
+		if v, ok := parseFloatPtr(n.Voltage); ok {
+			voltage = fmt.Sprintf("%.3f V", v)
+		}
+
+		temp := "n/a"
+		if v, ok := parseFloatPtr(n.Temperature); ok {
+			temp = fmt.Sprintf("%.2f °C", v)
+		}
+
+		hum := "n/a"
+		if v, ok := parseFloatPtr(n.RelativeHumidity); ok {
+			hum = fmt.Sprintf("%.2f %%", v)
+		}
+
+		rad := "n/a"
+		if n.Radiation != nil && strings.TrimSpace(*n.Radiation) != "" {
+			rad = strings.TrimSpace(*n.Radiation)
+		}
+
+		uptime := formatUptimeSeconds(n.UptimeSeconds)
+
+		blocks = append(blocks, strings.Join([]string{
+			fmt.Sprintf("[%d] Нода: %s %s", r.PK, n.ShortName, n.LongName),
+			fmt.Sprintf("id: %s", n.ID),
+			fmt.Sprintf("node_id: %s", n.NodeID),
+			fmt.Sprintf("short_name: %s", n.ShortName),
+			fmt.Sprintf("long_name: %s", n.LongName),
+			fmt.Sprintf("battery_level: %d%%", n.BatteryLevel),
+			fmt.Sprintf("voltage: %s", voltage),
+			fmt.Sprintf("uptime_seconds: %s", uptime),
+			fmt.Sprintf("temperature: %s", temp),
+			fmt.Sprintf("relative_humidity: %s", hum),
+			fmt.Sprintf("barometric_pressure: %s", barMMHG),
+			fmt.Sprintf("radiation: %s", rad),
+			fmt.Sprintf("updated_at: %s", formatAPITimeLocal(n.UpdatedAt)),
+		}, "\n"))
+
+		if tr != nil {
+			tr.step()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	if len(blocks) == 0 {
+		return "У вас нет записей в onemesh", nil
+	}
+	return strings.Join(blocks, "\n"+lineSeparator+"\n"), nil
 }
 
 func initDB(path string) (*sql.DB, error) {
@@ -537,98 +929,6 @@ func deleteMeshcoretel(db *sql.DB, pk int64, owner string) (string, error) {
 	return fmt.Sprintf("Запись meshcoretel id=%d удалена", pk), nil
 }
 
-func showMeshcoretel(
-	ctx context.Context,
-	db *sql.DB,
-	owner string,
-) (string, error) {
-	rows, err := db.Query(
-		`SELECT id, mesh_id, device_type, name, added_by
-		 FROM meshcoretel
-		 WHERE added_by = ?
-		 ORDER BY id`,
-		owner,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	var blocks []string
-	for rows.Next() {
-		var r meshRecord
-		if err := rows.Scan(
-			&r.PK,
-			&r.MeshID,
-			&r.DeviceType,
-			&r.Name,
-			&r.AddedBy,
-		); err != nil {
-			return "", err
-		}
-
-		switch r.DeviceType {
-		case "observer":
-			obs, err := fetchObserver(ctx, r.MeshID)
-			if err != nil {
-				blocks = append(blocks, fmt.Sprintf(
-					"[%d] Наблюдатель: %s\nmesh_id: %s\nОшибка получения данных: %v",
-					r.PK, r.Name, r.MeshID, err,
-				))
-				continue
-			}
-			blocks = append(blocks, strings.Join([]string{
-				fmt.Sprintf("[%d] Наблюдатель: %s", r.PK, safe(obs.Observer, r.Name)),
-				fmt.Sprintf("mesh_id: %s", r.MeshID),
-				fmt.Sprintf("status: %s", obs.Status),
-				fmt.Sprintf("is_online: %t", obs.IsOnline),
-				fmt.Sprintf("battery_mv: %d", obs.BatteryMV),
-				fmt.Sprintf("uptime_secs: %s",
-					formatSecondsHHMMSS(obs.UptimeSecs)),
-				fmt.Sprintf("errors: %d", obs.Errors),
-				fmt.Sprintf("queue_len: %d", obs.QueueLen),
-				fmt.Sprintf("last_message_at: %s",
-					formatAPITimeLocal(obs.LastMessageAt)),
-			}, "\n"))
-		case "repeater":
-			rep, err := fetchRepeaterDashboard(ctx, r.MeshID)
-			if err != nil {
-				blocks = append(blocks, fmt.Sprintf(
-					"[%d] Повторитель: %s\nmesh_id: %s\nОшибка получения данных: %v",
-					r.PK, r.Name, r.MeshID, err,
-				))
-				continue
-			}
-			blocks = append(blocks, strings.Join([]string{
-				fmt.Sprintf("[%d] Повторитель: %s",
-					r.PK, safe(rep.Repeater.Name, r.Name)),
-				fmt.Sprintf("mesh_id: %s", r.MeshID),
-				fmt.Sprintf("public_key_hex: %s", rep.Repeater.PublicKeyHex),
-				fmt.Sprintf("lat/lon: %.5f, %.5f",
-					rep.Repeater.Lat, rep.Repeater.Lon),
-				fmt.Sprintf("first_seen_at: %s",
-					formatAPITimeLocal(rep.Repeater.FirstSeenAt)),
-				fmt.Sprintf("last_seen_at: %s",
-					formatAPITimeLocal(rep.Repeater.LastSeenAt)),
-				fmt.Sprintf("resolved_region_code: %s", rep.ResolvedRegionCode),
-			}, "\n"))
-		default:
-			blocks = append(blocks, fmt.Sprintf(
-				"[%d] %s\nmesh_id: %s\nНеизвестный тип устройства: %s",
-				r.PK, r.Name, r.MeshID, r.DeviceType,
-			))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-
-	if len(blocks) == 0 {
-		return "У вас нет записей в meshcoretel", nil
-	}
-	return strings.Join(blocks, "\n"+lineSeparator+"\n"), nil
-}
-
 func addOnemesh(
 	ctx context.Context,
 	db *sql.DB,
@@ -694,7 +994,8 @@ func listOnemesh(db *sql.DB, owner string) (string, error) {
 		}
 		out = append(out, fmt.Sprintf(
 			"%d) %s %s, node_id=%s",
-			r.PK, strings.TrimSpace(r.ShortName), strings.TrimSpace(r.LongName), r.NodeID,
+			r.PK, strings.TrimSpace(r.ShortName), strings.TrimSpace(r.LongName),
+			r.NodeID,
 		))
 	}
 	if err := rows.Err(); err != nil {
@@ -720,128 +1021,6 @@ func deleteOnemesh(db *sql.DB, pk int64, owner string) (string, error) {
 		return fmt.Sprintf("Запись onemesh id=%d не найдена среди ваших", pk), nil
 	}
 	return fmt.Sprintf("Запись onemesh id=%d удалена", pk), nil
-}
-
-func showOnemesh(
-	ctx context.Context,
-	db *sql.DB,
-	owner string,
-) (string, error) {
-	rows, err := db.Query(
-		`SELECT id, node_id, short_name, long_name, added_by
-		 FROM onemesh
-		 WHERE added_by = ?
-		 ORDER BY id`,
-		owner,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	var blocks []string
-
-	for rows.Next() {
-		var r oneMeshRecord
-		if err := rows.Scan(
-			&r.PK,
-			&r.NodeID,
-			&r.ShortName,
-			&r.LongName,
-			&r.AddedBy,
-		); err != nil {
-			return "", err
-		}
-
-		n, err := fetchOnemeshNode(ctx, r.NodeID)
-		if err != nil {
-			blocks = append(blocks, fmt.Sprintf(
-				"[%d] Нода: %s %s\nnode_id: %s\nОшибка получения данных: %v",
-				r.PK, r.ShortName, r.LongName, r.NodeID, err,
-			))
-			continue
-		}
-
-		barMMHG := "n/a"
-		if v, ok := parseFloatPtr(n.BarometricPressure); ok {
-			barMMHG = fmt.Sprintf("%.1f мм.рт.ст", v*0.75006156)
-		}
-
-		voltage := "n/a"
-		if v, ok := parseFloatPtr(n.Voltage); ok {
-			voltage = fmt.Sprintf("%.3f V", v)
-		}
-
-		temp := "n/a"
-		if v, ok := parseFloatPtr(n.Temperature); ok {
-			temp = fmt.Sprintf("%.2f °C", v)
-		}
-
-		hum := "n/a"
-		if v, ok := parseFloatPtr(n.RelativeHumidity); ok {
-			hum = fmt.Sprintf("%.2f %%", v)
-		}
-
-		rad := "n/a"
-		if n.Radiation != nil && strings.TrimSpace(*n.Radiation) != "" {
-			rad = strings.TrimSpace(*n.Radiation)
-		}
-
-		uptime := formatUptimeSeconds(n.UptimeSeconds)
-
-		blocks = append(blocks, strings.Join([]string{
-			fmt.Sprintf("[%d] Нода: %s %s", r.PK, n.ShortName, n.LongName),
-			fmt.Sprintf("id: %s", n.ID),
-			fmt.Sprintf("node_id: %s", n.NodeID),
-			fmt.Sprintf("short_name: %s", n.ShortName),
-			fmt.Sprintf("long_name: %s", n.LongName),
-			fmt.Sprintf("battery_level: %d%%", n.BatteryLevel),
-			fmt.Sprintf("voltage: %s", voltage),
-			fmt.Sprintf("uptime_seconds: %s", uptime),
-			fmt.Sprintf("temperature: %s", temp),
-			fmt.Sprintf("relative_humidity: %s", hum),
-			fmt.Sprintf("barometric_pressure: %s", barMMHG),
-			fmt.Sprintf("radiation: %s", rad),
-			fmt.Sprintf("updated_at: %s", formatAPITimeLocal(n.UpdatedAt)),
-		}, "\n"))
-	}
-
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-
-	if len(blocks) == 0 {
-		return "У вас нет записей в onemesh", nil
-	}
-	return strings.Join(blocks, "\n"+lineSeparator+"\n"), nil
-}
-
-func showAll(
-	ctx context.Context,
-	db *sql.DB,
-	owner string,
-) (string, error) {
-	meshTxt, err := showMeshcoretel(ctx, db, owner)
-	if err != nil {
-		return "", err
-	}
-	oneTxt, err := showOnemesh(ctx, db, owner)
-	if err != nil {
-		return "", err
-	}
-
-	var parts []string
-	if meshTxt != "У вас нет записей в meshcoretel" {
-		parts = append(parts, "meshcoretel:\n"+meshTxt)
-	}
-	if oneTxt != "У вас нет записей в onemesh" {
-		parts = append(parts, "onemesh:\n"+oneTxt)
-	}
-
-	if len(parts) == 0 {
-		return "У вас нет записей ни в одной таблице", nil
-	}
-	return strings.Join(parts, "\n"+lineSeparator+"\n"), nil
 }
 
 func detectMeshcoretelType(
@@ -1067,8 +1246,8 @@ func sendText(
 	client *mautrix.Client,
 	roomID id.RoomID,
 	text string,
-) error {
-	_, err := client.SendMessageEvent(
+) (id.EventID, error) {
+	resp, err := client.SendMessageEvent(
 		ctx,
 		roomID,
 		event.EventMessage,
@@ -1076,6 +1255,31 @@ func sendText(
 			MsgType: event.MsgText,
 			Body:    text,
 		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return resp.EventID, nil
+}
+
+func editText(
+	ctx context.Context,
+	client *mautrix.Client,
+	roomID id.RoomID,
+	targetEventID id.EventID,
+	text string,
+) error {
+	content := &event.MessageEventContent{
+		MsgType: event.MsgText,
+		Body:    text,
+	}
+	content.SetEdit(targetEventID)
+
+	_, err := client.SendMessageEvent(
+		ctx,
+		roomID,
+		event.EventMessage,
+		content,
 	)
 	return err
 }
