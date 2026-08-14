@@ -247,7 +247,15 @@ func handleCommand(
 
 	switch strings.ToLower(raw) {
 	case "ping", "/ping":
-		return "pong", nil
+		meshStatus := serviceAvailability(ctx, "https://meshcoretel.ru/api")
+		oneStatus := serviceAvailability(ctx, "https://map.onemesh.ru/api/v1")
+
+		return strings.Join([]string{
+			"pong",
+			fmt.Sprintf("meshcoretel: %s", meshStatus),
+			fmt.Sprintf("onemesh: %s", oneStatus),
+		}, "\n"), nil
+
 	case "help", "/help":
 		return strings.Join([]string{
 			"Команды:",
@@ -262,6 +270,7 @@ func handleCommand(
 			"!show onemesh",
 			"!show all",
 		}, "\n"), nil
+
 	default:
 		return "", errors.New("unknown command")
 	}
@@ -1289,4 +1298,22 @@ func trimReply(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n...output truncated..."
+}
+
+func serviceAvailability(parent context.Context, rawURL string) string {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "недоступен"
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "недоступен"
+	}
+	defer resp.Body.Close()
+
+	return "доступен"
 }
