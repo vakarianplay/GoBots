@@ -1,5 +1,5 @@
 # GoBots
-Collection of telegram bots for various situations
+Collection of telegram bots for various situations.
 
 ![alt text](https://img.shields.io/badge/Golang-1.21.1-blue?style=flat-square&logo=go)
 ![alt text](https://img.shields.io/badge/Telegram%20bot-gray?style=flat-square&logo=telegram)
