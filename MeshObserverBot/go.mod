@@ -1,4 +1,4 @@
-module matrix-bot
+module mesh_matrix_bot
 
 go 1.25.0
 
