@@ -1,1 +1,16 @@
---
+matrix:
+    homeserver: https://martix.example
+    username: user
+    password: superpass
+    device_id: BOTDEVICE
+
+room:
+    target_room: "!targetroom:matrix.example"
+    # allowed_user: "@admin:matrix.example"
+    allowed_user: "*"
+
+database:
+  sqlite_path: "./base.sqlite3"
+
+
+
