@@ -39,6 +39,20 @@ Fetching information about mesh-nodes from [meshcoretel.ru](meshcoretel.ru) and 
 >* Edit [config.yml](https://github.com/vakarianplay/GoBots/blob/main/MeshObserverBot/config.yml) for your configuration
 >* Run execute
 
+## 📳 Commands
+
+>* help
+>* ping
+>* !add meshcoretel <ID>
+>* !add onemesh <ID>
+>* !list meshcoretel
+>* !list onemesh
+>* !delete meshcoretel <PRIMARY_KEY_ID>
+>* !delete onemesh <PRIMARY_KEY_ID>
+>* !show meshcoretel
+>* !show onemesh
+>* !show all
+
 
 ## 📑 Dependencies
 
