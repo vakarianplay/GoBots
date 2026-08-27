@@ -16,6 +16,8 @@ Collection of telegram bots for various situations.
 
 # 📦[Goslingator bot](https://github.com/vakarianplay/GoTelegramBots/tree/main/Gosling_tgbot)
 
+![alt text](https://img.shields.io/badge/Telegram%20bot-gray?style=flat-square&logo=telegram)
+
 ![alt text](https://img.shields.io/badge/Status-in%20complete-2E8B57?style=for-the-badge&logo=Buddy)
 
 * Random wisdom from Gosling
@@ -28,6 +30,27 @@ Collection of telegram bots for various situations.
 ## 🛠️ Releases: 
 
 > For windows x64 and linux x64 [https://github.com/vakarianplay/Gosling_tgbot/releases](https://github.com/vakarianplay/GoBots/releases/tag/v1.0.5)
+
+
+
+------------------------
+-------------------------
+
+
+# 📦[MeshObserver_Bot (matrix)](https://github.com/vakarianplay/GoBots/tree/main/MeshObserverBot)
+
+![alt text](https://img.shields.io/badge/Matrix%20bot-gray?style=flat-square&logo=matrix)
+
+![alt text](https://img.shields.io/badge/Status-in%20complete-2E8B57?style=for-the-badge&logo=Buddy)
+
+* Monitoring [meshcoretel.ru](meshcoretel.ru) and [onemesh.ru](onemesh.ru)
+* Send report to Matrix room
+* One-file build for Windows and Linux
+
+
+## 🛠️ Releases: 
+
+> For windows x64 and linux x64 [https://github.com/vakarianplay/GoBots/tree/main/MeshObserverBot](https://github.com/vakarianplay/GoBots/tree/main/MeshObserverBot)
 
 
 
