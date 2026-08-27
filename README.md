@@ -27,7 +27,7 @@ Collection of telegram bots for various situations.
 
 ## 🛠️ Releases: 
 
-> For windows x64 and linux x64 https://github.com/vakarianplay/Gosling_tgbot/releases
+> For windows x64 and linux x64 [https://github.com/vakarianplay/Gosling_tgbot/releases](https://github.com/vakarianplay/GoBots/releases/tag/v1.0.5)
 
 
 
